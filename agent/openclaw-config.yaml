@@ -1,0 +1,31 @@
+# OpenClaw agent configuration — Grounded Answer Desk
+# Docs: https://www.npmjs.com/package/openclaw
+
+agent:
+  name: grounded-answer-desk
+  version: "1.0.0"
+
+  # System prompt (loaded from file at startup)
+  system_prompt_file: ./prompts/system.txt
+
+  # LLM backend (reads from environment)
+  llm:
+    base_url: ${LLM_BASE_URL:-http://localhost:11434/v1}
+    model: ${LLM_MODEL:-llama3.2}
+    api_key: ${LLM_API_KEY:-ollama}   # placeholder; Ollama ignores this
+    temperature: 0.1                   # low temp for factual grounding
+    max_tokens: 1024
+
+  # MCP servers the agent is allowed to call
+  mcp_servers:
+    - name: grounded-answer-desk-kb
+      transport: sse
+      url: ${MCP_URL:-http://127.0.0.1:8000/sse}
+
+  # Tool selection strategy
+  tool_choice: auto
+
+  # How the agent loop works
+  loop:
+    max_iterations: 6       # prevent runaway loops
+    early_stop_on_answer: true
