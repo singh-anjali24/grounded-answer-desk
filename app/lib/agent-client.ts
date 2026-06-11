@@ -43,9 +43,7 @@ const ABSTAIN_THRESHOLD = 0.40;
 // ── MCP client (SSE transport) ──────────────────────────────────────────────
 
 async function createMcpClient(): Promise<Client> {
-  const transport = new SSEClientTransport(new URL(MCP_URL), {
-    headers: { "Bypass-Tunnel-Reminder": "true" }
-  });
+  const transport = new SSEClientTransport(new URL(MCP_URL));
   const client = new Client(
     { name: "grounded-answer-desk-frontend", version: "1.0.0" },
     { capabilities: {} }
