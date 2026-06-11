@@ -8,7 +8,6 @@ mcp = FastMCP(
     "grounded-answer-desk",
     host="0.0.0.0",
     port=8001,
-    stateless_http=True,
 )
 
 @mcp.tool()
