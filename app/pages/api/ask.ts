@@ -8,7 +8,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 // ../../agent/agent-client.ts once an LLM is configured.
 
 
-import { ask } from "../../../agent/agent-client";
+import { ask } from "../../lib/agent-client";
 
 export default async function handler(
   req: NextApiRequest,
