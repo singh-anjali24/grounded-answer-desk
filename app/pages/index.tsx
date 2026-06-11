@@ -4,7 +4,7 @@ import AskBox from "../components/AskBox";
 import AnswerCard from "../components/AnswerCard";
 import RetrievalInspector from "../components/RetrievalInspector";
 import { askQuestion, AskResponse } from "../lib/api";
-import "../styles/globals.css";
+
 
 export default function Home() {
   const [loading, setLoading] = useState(false);
