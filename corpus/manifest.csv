@@ -1,0 +1,6 @@
+id,title,url,local_path
+1,Users & Permissions,https://docs.strapi.io/cms/features/users-permissions,corpus/sources/strapi-001-users-permissions.md
+2,Role-Based Access Control,https://docs.strapi.io/cms/features/rbac,corpus/sources/strapi-002-rbac.md
+3,API Tokens,https://docs.strapi.io/cms/features/api-tokens,corpus/sources/strapi-003-api-tokens.md
+4,Webhooks,https://docs.strapi.io/cms/features/webhooks,corpus/sources/strapi-004-webhooks.md
+5,Models,https://docs.strapi.io/cms/features/content-type-builder,corpus/sources/strapi-005-models.md
