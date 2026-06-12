@@ -107,7 +107,7 @@ async function fetchRetrieval(
 async function runOpenClawAgent(question: string): Promise<string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "x-openclaw-model": "meta-llama/llama-3.2-3b-instruct:free"
+    "x-openclaw-model": "openrouter/meta-llama/llama-3.2-3b-instruct:free"
   };
   if (OPENCLAW_TOKEN) {
     headers["Authorization"] = `Bearer ${OPENCLAW_TOKEN}`;
