@@ -18,7 +18,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 
 // Load the grounding system prompt from disk
 const SYSTEM_PROMPT = readFileSync(
@@ -51,12 +51,12 @@ export interface AgentResponse {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-// OpenClaw Gateway on VPS (tunnelled to the internet via Pinggy)
+// OpenClaw Gateway on VPS (direct IP access)
 const OPENCLAW_URL = process.env.OPENCLAW_URL ?? "http://127.0.0.1:18789";
 const OPENCLAW_TOKEN = process.env.OPENCLAW_TOKEN ?? "";
 
-// MCP server on VPS — used directly for the Retrieval Inspector
-const MCP_URL = process.env.MCP_URL ?? "http://127.0.0.1:8001/mcp";
+// MCP server on VPS — used directly for the Retrieval Inspector (SSE transport)
+const MCP_URL = process.env.MCP_URL ?? "http://127.0.0.1:8001/sse";
 
 const ABSTAIN_THRESHOLD = 0.4;
 
@@ -68,7 +68,7 @@ async function fetchRetrieval(
 ): Promise<{ chunks: RetrievedChunk[]; error: string | null }> {
   let client: Client | null = null;
   try {
-    const transport = new StreamableHTTPClientTransport(new URL(MCP_URL));
+    const transport = new SSEClientTransport(new URL(MCP_URL));
     client = new Client(
       { name: "grounded-answer-desk-inspector", version: "1.0.0" },
       { capabilities: {} }
