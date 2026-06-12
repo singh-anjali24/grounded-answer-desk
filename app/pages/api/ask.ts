@@ -82,7 +82,7 @@ async function fetchRetrieval(
     return [];
   } catch (err) {
     console.error("[ask] MCP retrieval error (inspector):", err);
-    return [];
+    return [{ source_id: "ERROR", chunk_id: "debug", score: 1.0, text: String(err) }];
   } finally {
     try { await client?.close(); } catch {}
   }
