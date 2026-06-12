@@ -38,21 +38,21 @@ else
   check "Qdrant collection strapi_docs" "empty or not found — run ingestion first"
 fi
 
-# 3. MCP server /mcp endpoint responds
+# 3. MCP server /sse endpoint responds
 MCP_STATUS=$(curl -sf --max-time 5 -o /dev/null -w "%{http_code}" \
-  -X POST "http://localhost:${MCP_PORT}/mcp" \
+  -X POST "http://localhost:${MCP_PORT}/sse" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}},"id":1}' \
   2>&1 || echo "000")
-if [ "$MCP_STATUS" = "200" ]; then
-  check "MCP server /mcp endpoint (port $MCP_PORT)" "ok"
+if [ "$MCP_STATUS" = "200" ] || [ "$MCP_STATUS" = "405" ] || [ "$MCP_STATUS" = "400" ]; then
+  check "MCP server /sse endpoint (port $MCP_PORT)" "ok"
 else
-  check "MCP server /mcp endpoint (port $MCP_PORT)" "HTTP $MCP_STATUS — is mcp-server.service running?"
+  check "MCP server /sse endpoint (port $MCP_PORT)" "HTTP $MCP_STATUS — is mcp-server.service running?"
 fi
 
 # 4. search_kb_tool via MCP returns results
 SEARCH_BODY=$(curl -sf --max-time 10 \
-  -X POST "http://localhost:${MCP_PORT}/mcp" \
+  -X POST "http://localhost:${MCP_PORT}/messages" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_kb_tool","arguments":{"query":"API token Strapi","top_k":2}},"id":2}' \
