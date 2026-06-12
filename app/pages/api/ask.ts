@@ -107,7 +107,7 @@ async function fetchRetrieval(
 async function runOpenClawAgent(question: string): Promise<string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "x-openclaw-model": "openrouter/liquid/lfm-2.5-1.2b-instruct:free"
+    "x-openclaw-model": "openrouter/google/gemma-4-31b-it:free"
   };
   if (OPENCLAW_TOKEN) {
     headers["Authorization"] = `Bearer ${OPENCLAW_TOKEN}`;
@@ -120,7 +120,13 @@ async function runOpenClawAgent(question: string): Promise<string> {
       model: "openclaw/default",
       temperature: 0.1,
       max_tokens: 1024,
-      messages: [{ role: "user", content: question }],
+      messages: [
+        { 
+          role: "system", 
+          content: "You are a strict RAG agent. You MUST use the search_kb_tool to retrieve context before answering. DO NOT answer from your own knowledge. If the retrieved context does not answer the question, say 'I don't have that in my sources.'" 
+        },
+        { role: "user", content: question }
+      ],
     }),
     // Vercel serverless max execution: 60 s
     signal: AbortSignal.timeout(55_000),
