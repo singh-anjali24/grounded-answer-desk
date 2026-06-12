@@ -11,7 +11,7 @@
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 export interface RetrievedChunk {
   source_id: string;
@@ -34,18 +34,16 @@ export interface AgentResponse {
   abstained: boolean;
 }
 
-const MCP_URL = process.env.MCP_URL ?? "http://127.0.0.1:8000/sse";
+const MCP_URL = process.env.MCP_URL ?? "http://127.0.0.1:8001/mcp";
 const LLM_BASE_URL = process.env.LLM_BASE_URL ?? "http://localhost:11434/v1";
 const LLM_MODEL = process.env.LLM_MODEL ?? "llama3.2";
 const LLM_API_KEY = process.env.LLM_API_KEY ?? "ollama";
 const ABSTAIN_THRESHOLD = 0.40;
 
-// ── MCP client (SSE transport) ──────────────────────────────────────────────
+// ── MCP client (Streamable HTTP transport) ──────────────────────────────────
 
 async function createMcpClient(): Promise<Client> {
-  const transport = new SSEClientTransport(new URL(MCP_URL), {
-    headers: { "Bypass-Tunnel-Reminder": "true" }
-  });
+  const transport = new StreamableHTTPClientTransport(new URL(MCP_URL));
   const client = new Client(
     { name: "grounded-answer-desk-frontend", version: "1.0.0" },
     { capabilities: {} }
