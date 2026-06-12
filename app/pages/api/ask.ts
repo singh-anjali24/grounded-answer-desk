@@ -79,12 +79,13 @@ async function fetchRetrieval(
     if (raw?.type === "text") {
       return JSON.parse(raw.text) as RetrievedChunk[];
     }
+    return [];
   } catch (err) {
     console.error("[ask] MCP retrieval error (inspector):", err);
+    return [];
   } finally {
     try { await client?.close(); } catch {}
   }
-  return [];
 }
 
 // ── OpenClaw: run the agent (does MCP retrieval internally) ──────────────────
