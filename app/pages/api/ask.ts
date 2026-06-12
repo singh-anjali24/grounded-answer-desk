@@ -15,8 +15,16 @@
 export const maxDuration = 60;
 
 import type { NextApiRequest, NextApiResponse } from "next";
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+// Load the grounding system prompt from disk
+const SYSTEM_PROMPT = readFileSync(
+  resolve(process.cwd(), "lib/prompts/system.txt"),
+  "utf-8"
+);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -115,15 +123,7 @@ async function runOpenClawAgent(question: string): Promise<string> {
       messages: [
         {
           role: "system",
-          content:
-            "You are a strict RAG assistant with access to a knowledge base via MCP tools. " +
-            "RULES (follow exactly): " +
-            "1. You MUST call search_kb_tool FIRST before answering anything. DO NOT skip this step. " +
-            "2. Answer ONLY using text from the retrieved passages returned by search_kb_tool. " +
-            "3. DO NOT use web search, your training data, or any external knowledge. " +
-            "4. Cite source_id and chunk_id for every fact you state. " +
-            "5. If search_kb_tool returns no relevant results (score < 0.4), reply exactly: 'I don\\'t have that in my sources.' " +
-            "6. Never hallucinate or guess — only facts from retrieved passages.",
+          content: SYSTEM_PROMPT,
         },
         { role: "user", content: question },
       ],
