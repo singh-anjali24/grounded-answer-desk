@@ -146,13 +146,15 @@ export default async function handler(
       fetchRetrieval(q),
     ]);
 
+    const safeChunks = Array.isArray(chunks) ? chunks : [];
+
     // Abstain decision based on top retrieval score
-    const topScore = chunks[0]?.score ?? 0;
+    const topScore = safeChunks[0]?.score ?? 0;
     const abstained =
-      chunks.length === 0 || topScore < ABSTAIN_THRESHOLD;
+      safeChunks.length === 0 || topScore < ABSTAIN_THRESHOLD;
 
     // Build citations from the top chunks passed to the inspector
-    const citations: Citation[] = chunks.map((c) => ({
+    const citations: Citation[] = safeChunks.map((c) => ({
       source_id: c.source_id,
       chunk_id: c.chunk_id,
       score: c.score,
@@ -166,7 +168,7 @@ export default async function handler(
     const response: AgentResponse = {
       answer: finalAnswer,
       citations: abstained ? [] : citations,
-      retrieval: chunks,
+      retrieval: safeChunks,
       abstained,
     };
 
