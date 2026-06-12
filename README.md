@@ -11,23 +11,26 @@
 Question (frontend)
     │
     ▼
-OpenClaw/Hermes Agent
-    │   calls via MCP (SSE)
-    ▼
-MCP Server  ─── search_kb_tool(query) ──▶  Qdrant vector store
-            ◀── top-k chunks + scores ───
-    │   calls via MCP (SSE)
-    ▼
-get_source_tool(source_id) → full source doc
+Next.js API route (app/pages/api/ask.ts)
     │
-    ▼
-LLM (Ollama / any OpenAI-compatible)
+    ├──► OpenClaw Gateway (VPS :18789) — Google Gemini 2.5 Flash
+    │         │  retrieves via MCP (Streamable HTTP)
+    │         ▼
+    │    MCP Server (VPS :8001)
+    │         │  search_kb_tool / get_source_tool
+    │         ▼
+    │    Qdrant vector store (VPS :6333)
+    │         └── top-k chunks + cosine scores
     │
-    ▼
+    └──► MCP Server (VPS :8001) — direct call for Retrieval Inspector
+              │
+              ▼
+         top-k chunks + scores → Inspector panel
+
 Answer + Citations + Retrieval Inspector (frontend)
 ```
 
-**Key constraint:** the agent **never touches Qdrant directly** — it only calls the two MCP tools. That's the point.
+**Key constraint:** the agent **never touches Qdrant directly** — it only retrieves through the two MCP tools (`search_kb_tool`, `get_source_tool`). That is the MCP boundary.
 
 ---
 
@@ -35,13 +38,13 @@ Answer + Citations + Retrieval Inspector (frontend)
 
 | Layer | Technology |
 |---|---|
-| Vector store | Qdrant (Docker) |
+| Vector store | Qdrant (Docker, persisted to `data/qdrant/`) |
 | Embeddings | `all-MiniLM-L6-v2` via `sentence-transformers` (local, no API key) |
-| MCP server | Python · `mcp` SDK · FastMCP · SSE transport |
-| Agent | OpenClaw + MCP TypeScript SDK |
-| LLM | Ollama (`llama3.2`) or any OpenAI-compatible endpoint |
-| Frontend | Next.js 15 · deployed on Vercel |
+| MCP server | Python · `mcp` SDK · FastMCP · **Streamable HTTP transport** (port 8001) |
+| Agent | **OpenClaw Gateway** on VPS — Google **Gemini 2.5 Flash** (Google AI Studio) |
+| Frontend | Next.js 15 · deployed on **Vercel** |
 | Corpus | Strapi v5 documentation (5 sources, ~50 chunks) |
+| VPS | AWS EC2 (Ubuntu 22.04) — MCP + OpenClaw run as **systemd services** |
 
 ---
 
@@ -50,7 +53,8 @@ Answer + Citations + Retrieval Inspector (frontend)
 - Python 3.11+
 - Node.js 20+
 - Docker (for Qdrant)
-- (Optional) Ollama running locally for LLM generation
+- A Google AI Studio API key (`gemini-2.5-flash`)
+- OpenClaw installed globally on the VPS (`npm install -g openclaw`)
 
 ---
 
@@ -59,15 +63,17 @@ Answer + Citations + Retrieval Inspector (frontend)
 ### 1 · Clone & environment
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/grounded-answer-desk.git
+git clone https://github.com/singh-anjali24/grounded-answer-desk.git
 cd grounded-answer-desk
 cp .env.example .env
-# Edit .env — at minimum set QDRANT_URL and optionally LLM_BASE_URL
+# Edit .env — set QDRANT_URL, LLM_BASE_URL, LLM_MODEL, LLM_API_KEY
 ```
 
 ### 2 · Install Python dependencies
 
 ```bash
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
@@ -76,14 +82,15 @@ pip install -r requirements.txt
 ```bash
 docker run -d \
   --name qdrant \
-  -p 6335:6333 -p 6336:6334 \
+  --restart always \
+  -p 6333:6333 -p 6334:6334 \
   -v "$(pwd)/data/qdrant:/qdrant/storage" \
   qdrant/qdrant
 ```
 
 Wait ~5 seconds for Qdrant to become healthy:
 ```bash
-curl http://localhost:6335/healthz
+curl http://localhost:6333/healthz
 # → {"title":"qdrant - vector search engine","version":"..."}
 ```
 
@@ -106,18 +113,11 @@ Expected output: `Upserted ~50 chunks into strapi_docs`
 ```bash
 cd mcp-server
 python server.py
-# → Uvicorn running on http://127.0.0.1:8000
-# MCP Inspector URL: http://127.0.0.1:8000/sse
+# → Uvicorn running on http://0.0.0.0:8001
+# MCP endpoint: http://localhost:8001/mcp
 ```
 
-### 6 · (Optional) Start Ollama for LLM
-
-```bash
-ollama serve
-ollama pull llama3.2
-```
-
-### 7 · Start the frontend
+### 6 · Start the frontend
 
 ```bash
 cd app
@@ -126,13 +126,20 @@ npm run dev
 # → http://localhost:3000
 ```
 
+Set these in your local `app/.env.local`:
+```
+OPENCLAW_URL=http://localhost:18789
+OPENCLAW_TOKEN=<your openclaw gateway token>
+MCP_URL=http://localhost:8001/mcp
+```
+
 Open http://localhost:3000 — type a question, see the grounded answer, citations, and retrieval inspector.
 
 ---
 
 ## MCP Tools
 
-The MCP server exposes exactly two tools (as required):
+The MCP server exposes exactly two tools (as required by the assignment):
 
 ### `search_kb_tool(query: str, top_k: int = 4) → list`
 
@@ -141,10 +148,10 @@ Embeds `query` with `all-MiniLM-L6-v2`, runs cosine-similarity search in Qdrant,
 ```json
 [
   {
-    "source_id": "strapi-002",
-    "chunk_id": "strapi-002-3",
-    "text": "## Role management\nSuperAdmin can create ...",
-    "score": 0.8214
+    "source_id": "strapi-003",
+    "chunk_id": "strapi-003-2",
+    "text": "## Configuration\nMost configuration options for API tokens...",
+    "score": 0.8747
   }
 ]
 ```
@@ -155,7 +162,7 @@ Retrieves all chunks belonging to a source document:
 
 ```json
 {
-  "source_id": "strapi-002",
+  "source_id": "strapi-003",
   "found": true,
   "chunks": [{ "id": "...", "payload": { ... } }]
 }
@@ -166,14 +173,24 @@ Retrieves all chunks belonging to a source document:
 ## Testing with MCP Inspector
 
 ```bash
-npx @modelcontextprotocol/inspector http://localhost:8000/sse
+npx @modelcontextprotocol/inspector http://localhost:8001/mcp
 ```
-
-Or open https://inspector.tools.anthropic.com and connect to `http://localhost:8000/sse`.
 
 Test queries:
 - `search_kb_tool` → `{"query": "How does RBAC work in Strapi?", "top_k": 4}`
-- `get_source_tool` → `{"source_id": "strapi-002"}`
+- `get_source_tool` → `{"source_id": "strapi-003"}`
+
+---
+
+## System Prompt (Grounding Contract)
+
+The agent's system prompt is defined in `app/pages/api/ask.ts` and enforces strict grounding:
+
+1. **Must call `search_kb_tool` first** before answering anything
+2. **Answer ONLY from retrieved passages** — no training data, no web search
+3. **Cite `source_id` and `chunk_id`** for every fact
+4. **Abstain** if top retrieval score < 0.40: _"I don't have that in my sources."_
+5. **Never hallucinate** — only facts from retrieved passages
 
 ---
 
@@ -189,23 +206,15 @@ The knowledge base is **Strapi v5 documentation** (5 topics):
 | strapi-004 | Webhooks | ~8 |
 | strapi-005 | Content-Type Builder / Models | ~12 |
 
-Chunking strategy: split by H2/H3 Markdown headings → each section is one chunk (~50–300 words). No overlap needed at this corpus size.
+Chunking strategy: split by H2/H3 Markdown headings → each section is one chunk (~50–300 words).
 
 ---
 
-## Grounding & Abstention
-
-- **System prompt** (`agent/prompts/system.txt`) instructs the agent to answer only from retrieved passages and cite `source_id`/`chunk_id` for every claim.
-- **Abstention threshold:** if `top_score < 0.40`, the system returns: _"I don't have that in my sources."_
-- **No hallucination path:** the LLM only sees the retrieved chunk text, never its full training knowledge.
-
----
-
-## VPS Deployment
+## VPS Deployment (full redeploy from scratch)
 
 ```bash
-# On the VPS (Ubuntu 22.04+):
-git clone https://github.com/YOUR_USERNAME/grounded-answer-desk.git
+# On a fresh Ubuntu 22.04 VPS:
+git clone https://github.com/singh-anjali24/grounded-answer-desk.git
 cd grounded-answer-desk
 cp .env.example .env && nano .env   # fill in your values
 bash scripts/deploy.sh
@@ -214,28 +223,34 @@ bash scripts/deploy.sh
 `deploy.sh` will:
 1. Install Python, Node, Docker
 2. Create a Python venv and install `requirements.txt`
-3. Start Qdrant as a Docker container (persisted to `data/qdrant/`)
+3. Start Qdrant as a Docker container (persisted to `data/qdrant/`, `--restart always`)
 4. Run the ingestion pipeline
-5. Register the MCP server as a `systemd` service (auto-restarts)
-6. Build and start the Next.js frontend with PM2
+5. Register the MCP server as a `systemd` service (`mcp-server.service`)
+6. Configure OpenClaw with Google AI Studio API key
+7. Register OpenClaw Gateway as a `systemd` service (`openclaw.service`)
 
-Frontend → Vercel: push the `app/` folder to Vercel (set `NEXT_PUBLIC_API_URL` and `LLM_BASE_URL` env vars in the Vercel dashboard).
+Both services auto-start on reboot and auto-restart on crash.
+
+Frontend → Vercel: push triggers auto-deploy. Set these env vars in Vercel dashboard:
+- `OPENCLAW_URL` — your VPS public IP + port 18789 (e.g. `http://3.x.x.x:18789`)
+- `OPENCLAW_TOKEN` — from `~/.openclaw/openclaw.json` on the VPS
+- `MCP_URL` — your VPS public IP + port 8001 (e.g. `http://3.x.x.x:8001/mcp`)
 
 ---
 
 ## Rubric Checklist
 
-| Requirement | Status |
+| Requirement | Implementation |
 |---|---|
-| OpenClaw/Hermes agent | `agent/agent-client.ts` + `agent/openclaw-config.yaml` |
-| Ingest corpus → chunks → embed → vector store | `ingestion/` pipeline + Qdrant |
-| MCP server with `search_kb` + `get_source` | `mcp-server/server.py` |
-| Agent retrieves **only** through MCP tools | Enforced by architecture |
-| Grounded answers with citations | System prompt + citation cards |
-| Abstain when retrieval is weak | Score threshold 0.40 |
-| Retrieval inspector (chunks + scores + source) | `RetrievalInspector.tsx` |
-| README redeploys from scratch | This file |
-| Deployed, public, persistent | Vercel + VPS + systemd |
+| OpenClaw agent on VPS | OpenClaw Gateway (`openclaw.service`) + Google Gemini 2.5 Flash |
+| Ingest corpus → chunks → embed → vector store | `ingestion/` pipeline → Qdrant |
+| MCP server with `search_kb_tool` + `get_source_tool` | `mcp-server/server.py` (FastMCP, Streamable HTTP) |
+| Agent retrieves **only** through MCP tools | Enforced by architecture — no direct Qdrant access in agent |
+| Grounded answers with citations | System prompt in `app/pages/api/ask.ts` + citation cards in frontend |
+| Abstain when retrieval is weak | Score threshold 0.40 in `ask.ts` |
+| Retrieval inspector (chunks + scores + source) | `app/components/RetrievalInspector.tsx` |
+| README redeploys from scratch | `scripts/deploy.sh` + this README |
+| Deployed, public, persistent | Vercel (frontend) + AWS EC2 with systemd (backend) |
 
 ---
 
@@ -244,19 +259,18 @@ Frontend → Vercel: push the `app/` folder to Vercel (set `NEXT_PUBLIC_API_URL`
 ```
 grounded-answer-desk/
 ├── agent/
-│   ├── agent-client.ts          # MCP → LLM agent
-│   ├── openclaw-config.yaml     # OpenClaw config
-│   └── prompts/system.txt       # Grounding system prompt
-├── app/                         # Next.js frontend
+│   └── openclaw-config.yaml     # OpenClaw agent config (MCP server URL, model)
+├── app/                         # Next.js frontend (deployed to Vercel)
 │   ├── components/
 │   │   ├── AskBox.tsx
 │   │   ├── AnswerCard.tsx
 │   │   ├── CitationCard.tsx
 │   │   └── RetrievalInspector.tsx
-│   ├── lib/api.ts
+│   ├── lib/
+│   │   └── agent-client.ts      # MCP client helper (used for inspector)
 │   ├── pages/
 │   │   ├── index.tsx
-│   │   └── api/ask.ts
+│   │   └── api/ask.ts           # Main API route + system prompt
 │   └── styles/globals.css
 ├── corpus/
 │   ├── manifest.csv             # Source registry
@@ -269,13 +283,13 @@ grounded-answer-desk/
 │   ├── embed_and_upsert.py
 │   └── utils.py
 ├── mcp-server/
-│   ├── server.py                # FastMCP SSE server
-│   ├── search_kb.py             # search_kb_tool impl
-│   ├── get_source.py            # get_source_tool impl
+│   ├── server.py                # FastMCP Streamable HTTP server (port 8001)
+│   ├── search_kb.py             # search_kb_tool implementation
+│   ├── get_source.py            # get_source_tool implementation
 │   └── schemas.py               # Pydantic models
 ├── scripts/
-│   ├── deploy.sh                # VPS full deploy
-│   ├── start.sh                 # Local start all
+│   ├── deploy.sh                # VPS full deploy from scratch
+│   ├── start.sh                 # Start all services locally
 │   └── smoke-test.sh            # Sanity checks
 ├── docs/
 │   ├── architecture.md

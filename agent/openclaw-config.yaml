@@ -5,27 +5,23 @@ agent:
   name: grounded-answer-desk
   version: "1.0.0"
 
-  # System prompt (loaded from file at startup)
-  system_prompt_file: ./prompts/system.txt
-
-  # LLM backend (reads from environment)
+  # LLM backend: Google Gemini 2.5 Flash via Google AI Studio
+  # Auth is configured on the VPS via: openclaw models auth paste-api-key --provider google
   llm:
-    base_url: ${LLM_BASE_URL:-http://localhost:11434/v1}
-    model: ${LLM_MODEL:-llama3.2}
-    api_key: ${LLM_API_KEY:-ollama}   # placeholder; Ollama ignores this
-    temperature: 0.1                   # low temp for factual grounding
+    model: google/gemini-2.5-flash
+    temperature: 0.1
     max_tokens: 1024
 
-  # MCP servers the agent is allowed to call
+  # MCP server the agent retrieves through (the only path to the knowledge base)
   mcp_servers:
     - name: grounded-answer-desk-kb
-      transport: sse
-      url: ${MCP_URL:-http://127.0.0.1:8000/sse}
+      transport: streamable-http
+      url: ${MCP_URL:-http://127.0.0.1:8001/mcp}
 
   # Tool selection strategy
   tool_choice: auto
 
-  # How the agent loop works
+  # Agent loop config
   loop:
-    max_iterations: 6       # prevent runaway loops
+    max_iterations: 6
     early_stop_on_answer: true
