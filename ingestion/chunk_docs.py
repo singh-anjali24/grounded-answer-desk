@@ -10,20 +10,20 @@ def normalize_text(text):
 
 def split_sections(md_text):
     sections = []
-    current_heading = None
+    current_heading = "Introduction"
     current_lines = []
 
     for line in md_text.splitlines():
         if HEADING_RE.match(line):
-            if current_heading is not None:
+            if current_lines:
+                # If there's content before the heading, save it
                 sections.append((current_heading, "\n".join(current_lines).strip()))
             current_heading = line.strip()
             current_lines = [line]
         else:
-            if current_heading is not None:
-                current_lines.append(line)
+            current_lines.append(line)
 
-    if current_heading is not None:
+    if current_lines:
         sections.append((current_heading, "\n".join(current_lines).strip()))
 
     return sections

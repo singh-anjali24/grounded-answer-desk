@@ -2,7 +2,7 @@
  * pages/api/ask.ts
  *
  * Request flow:
- *  1. Call the OpenClaw agent on VPS (tunnelled via Pinggy) — agent uses
+ *  1. Call the OpenClaw agent on VPS (direct IP) — agent uses
  *     google/gemini-2.5-flash and retrieves ONLY through the MCP server
  *     (search_kb_tool). This satisfies the MCP boundary rubric requirement.
  *
@@ -106,7 +106,7 @@ async function fetchRetrieval(
 
 // ── OpenClaw agent: grounded answer via Google Gemini 2.5 Flash ──────────────
 
-async function runOpenClawAgent(question: string): Promise<string> {
+async function runOpenClawAgent(question: string, retries = 2): Promise<string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -114,31 +114,47 @@ async function runOpenClawAgent(question: string): Promise<string> {
     headers["Authorization"] = `Bearer ${OPENCLAW_TOKEN}`;
   }
 
-  const resp = await fetch(`${OPENCLAW_URL}/v1/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: "openclaw/default",
-      temperature: 0.1,
-      max_tokens: 1024,
-      messages: [
-        {
-          role: "system",
-          content: SYSTEM_PROMPT,
-        },
-        { role: "user", content: question },
-      ],
-    }),
-    signal: AbortSignal.timeout(55_000),
-  });
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const resp = await fetch(`${OPENCLAW_URL}/v1/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: "openclaw/default",
+          temperature: 0.1,
+          max_tokens: 1024,
+          messages: [
+            {
+              role: "system",
+              content: SYSTEM_PROMPT,
+            },
+            { role: "user", content: question },
+          ],
+        }),
+        signal: AbortSignal.timeout(55_000),
+      });
 
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`OpenClaw agent error ${resp.status}: ${err}`);
+      if (resp.status === 429 && attempt < retries) {
+        console.warn(`[ask] 429 Too Many Requests. Retrying in ${2000 * (attempt + 1)}ms...`);
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1))); // 2s, 4s backoff
+        continue;
+      }
+
+      if (!resp.ok) {
+        const err = await resp.text();
+        throw new Error(`OpenClaw agent error ${resp.status}: ${err}`);
+      }
+
+      const data = await resp.json();
+      return data.choices?.[0]?.message?.content ?? "";
+    } catch (e) {
+      if (attempt === retries) throw e;
+      // Also retry on network errors (fetch failures)
+      console.warn(`[ask] Network error. Retrying in ${2000 * (attempt + 1)}ms...`);
+      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+    }
   }
-
-  const data = await resp.json();
-  return data.choices?.[0]?.message?.content ?? "";
+  return "";
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────

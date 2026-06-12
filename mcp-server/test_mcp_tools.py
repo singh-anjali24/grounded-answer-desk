@@ -10,7 +10,7 @@ import sys
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
-MCP_URL = "http://127.0.0.1:8000/sse"
+MCP_URL = "http://127.0.0.1:8001/mcp"
 
 PASS = 0
 FAIL = 0

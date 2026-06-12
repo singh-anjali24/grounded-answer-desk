@@ -6,12 +6,12 @@ from sentence_transformers import SentenceTransformer
 from schemas import SearchRequest
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
-client = QdrantClient(url=QDRANT_URL)
 model = SentenceTransformer("all-MiniLM-L6-v2")
 COLLECTION_NAME = "strapi_docs"
 
 
 def search_kb(req: SearchRequest):
+    client = QdrantClient(url=QDRANT_URL)
     vector = model.encode(req.query, normalize_embeddings=True).tolist()
     results = client.query_points(
         collection_name=COLLECTION_NAME,
