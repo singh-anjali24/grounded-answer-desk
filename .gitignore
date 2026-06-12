@@ -16,6 +16,7 @@ env/
 
 # Environment variables (never commit secrets)
 .env
+app/.env.local
 
 # Qdrant local storage (mounted Docker volume or local persistence)
 data/qdrant/
