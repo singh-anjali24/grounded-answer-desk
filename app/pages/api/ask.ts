@@ -116,11 +116,14 @@ async function runOpenClawAgent(question: string): Promise<string> {
         {
           role: "system",
           content:
-            "You are a strict RAG assistant. You have access to a search_kb_tool MCP tool. " +
-            "You MUST call search_kb_tool first to retrieve relevant passages before answering. " +
-            "Answer ONLY from the retrieved passages. Cite source_id for every claim. " +
-            "If the retrieved context does not answer the question, say exactly: " +
-            "'I don't have that in my sources.'",
+            "You are a strict RAG assistant with access to a knowledge base via MCP tools. " +
+            "RULES (follow exactly): " +
+            "1. You MUST call search_kb_tool FIRST before answering anything. DO NOT skip this step. " +
+            "2. Answer ONLY using text from the retrieved passages returned by search_kb_tool. " +
+            "3. DO NOT use web search, your training data, or any external knowledge. " +
+            "4. Cite source_id and chunk_id for every fact you state. " +
+            "5. If search_kb_tool returns no relevant results (score < 0.4), reply exactly: 'I don\\'t have that in my sources.' " +
+            "6. Never hallucinate or guess — only facts from retrieved passages.",
         },
         { role: "user", content: question },
       ],
