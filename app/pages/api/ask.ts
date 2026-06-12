@@ -77,11 +77,22 @@ async function fetchRetrieval(
       arguments: { query, top_k: topK },
     });
 
-    const raw = result.content?.[0];
-    if (raw?.type === "text") {
-      return JSON.parse(raw.text) as RetrievedChunk[];
+    const chunks: RetrievedChunk[] = [];
+    for (const raw of result.content ?? []) {
+      if (raw.type === "text") {
+        try {
+          const parsed = JSON.parse(raw.text);
+          if (Array.isArray(parsed)) {
+            chunks.push(...parsed);
+          } else {
+            chunks.push(parsed);
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
     }
-    return [];
+    return chunks;
   } catch (err) {
     console.error("[ask] MCP retrieval error (inspector):", err);
     return [];
