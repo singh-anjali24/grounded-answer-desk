@@ -78,7 +78,8 @@ async function fetchRetrieval(
     });
 
     const chunks: RetrievedChunk[] = [];
-    for (const raw of result.content ?? []) {
+    const contentList = (result.content as Array<any>) ?? [];
+    for (const raw of contentList) {
       if (raw.type === "text") {
         try {
           const parsed = JSON.parse(raw.text);
