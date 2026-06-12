@@ -14,6 +14,8 @@
  *  3. Merge results and return a single JSON response to the frontend.
  */
 
+export const maxDuration = 60; // Increase Vercel timeout to 60 seconds
+
 import type { NextApiRequest, NextApiResponse } from "next";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -82,7 +84,7 @@ async function fetchRetrieval(
     return [];
   } catch (err) {
     console.error("[ask] MCP retrieval error (inspector):", err);
-    return [{ source_id: "ERROR", chunk_id: "debug", score: 1.0, text: String(err) }];
+    return [];
   } finally {
     try { await client?.close(); } catch {}
   }
