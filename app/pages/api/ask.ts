@@ -65,7 +65,7 @@ const ABSTAIN_THRESHOLD = 0.4;
 async function fetchRetrieval(
   query: string,
   topK = 4
-): Promise<RetrievedChunk[]> {
+): Promise<{ chunks: RetrievedChunk[]; error: string | null }> {
   let client: Client | null = null;
   try {
     const transport = new StreamableHTTPClientTransport(new URL(MCP_URL));
@@ -88,14 +88,15 @@ async function fetchRetrieval(
           const parsed = JSON.parse(raw.text);
           chunks.push(parsed);
         } catch {
-          // ignore parse errors
+          // ignore JSON parse errors on individual chunks
         }
       }
     }
-    return chunks;
+    return { chunks, error: null };
   } catch (err) {
-    console.error("[ask] MCP retrieval error (inspector):", err);
-    return [];
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[ask] MCP retrieval error:", msg);
+    return { chunks: [], error: msg };
   } finally {
     try {
       await client?.close();
@@ -159,12 +160,19 @@ export default async function handler(
 
   try {
     // Run OpenClaw agent + MCP inspector in parallel
-    const [agentAnswer, chunks] = await Promise.all([
+    const [agentAnswer, retrieval] = await Promise.all([
       runOpenClawAgent(q),
       fetchRetrieval(q),
     ]);
 
-    const safeChunks = Array.isArray(chunks) ? chunks : [];
+    // Surface MCP errors clearly — never mask backend failure as abstention
+    if (retrieval.error) {
+      return res.status(503).json({
+        error: `MCP server unreachable: ${retrieval.error}. Check that mcp-server.service is running on the VPS.`,
+      });
+    }
+
+    const safeChunks = retrieval.chunks;
     const topScore = safeChunks[0]?.score ?? 0;
     const abstained = safeChunks.length === 0 || topScore < ABSTAIN_THRESHOLD;
 
@@ -176,7 +184,7 @@ export default async function handler(
     }));
 
     const finalAnswer = abstained
-      ? "⚠ Not in sources\nI don't have that in my sources. The retrieved passages don't contain enough information to answer this question reliably."
+      ? "I don't have that in my sources."
       : agentAnswer;
 
     const response: AgentResponse = {

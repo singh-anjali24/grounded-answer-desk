@@ -55,7 +55,7 @@ QDRANT_URL="http://localhost:${QDRANT_PORT}" \
 
 # ── 5. MCP server as systemd service ──────────────────────────────────
 echo "[5/6] Installing MCP server as systemd service …"
-MCP_PORT="${MCP_PORT:-8000}"
+MCP_PORT="${MCP_PORT:-8001}"
 cat > /tmp/mcp-server.service <<EOF
 [Unit]
 Description=Grounded Answer Desk MCP Server
@@ -79,8 +79,43 @@ sudo systemctl daemon-reload
 sudo systemctl enable mcp-server
 sudo systemctl restart mcp-server
 
-# ── 6. Frontend (Next.js) ─────────────────────────────────────────────
-echo "[6/6] Building and starting Next.js frontend …"
+# ── 6. OpenClaw Gateway ───────────────────────────────────────────────
+echo "[6/7] Installing OpenClaw Gateway …"
+npm install -g openclaw --silent 2>/dev/null || true
+
+# Register Google AI Studio API key if provided
+if [ -n "${GOOGLE_API_KEY:-}" ]; then
+  echo "$GOOGLE_API_KEY" | openclaw models auth paste-api-key --provider google
+  openclaw models set google/gemini-2.5-flash
+fi
+
+OPENCLAW_PORT="${OPENCLAW_PORT:-18789}"
+cat > /tmp/openclaw.service <<EOF2
+[Unit]
+Description=Grounded Answer Desk — OpenClaw Gateway
+After=network.target mcp-server.service
+Wants=mcp-server.service
+
+[Service]
+Type=simple
+User=${USER}
+WorkingDirectory=${HOME}
+ExecStart=/usr/bin/node /usr/lib/node_modules/openclaw/dist/index.js gateway run --port ${OPENCLAW_PORT} --bind lan --force
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+sudo mv /tmp/openclaw.service /etc/systemd/system/openclaw.service
+sudo systemctl daemon-reload
+sudo systemctl enable openclaw
+sudo systemctl restart openclaw
+
+# ── 7. Frontend (Next.js) ─────────────────────────────────────────────
+echo "[7/7] Building and starting Next.js frontend …"
 cd app
 npm ci --silent
 npm run build
@@ -92,5 +127,10 @@ pm2 save
 cd "$ROOT"
 echo ""
 echo "✔ Deployment complete."
-echo "  MCP SSE:    http://$(hostname -I | awk '{print $1}'):${MCP_PORT}/sse"
-echo "  Frontend:   http://$(hostname -I | awk '{print $1}'):3000"
+echo "  MCP server:      http://$(hostname -I | awk '{print $1}'):${MCP_PORT}/mcp"
+echo "  OpenClaw GW:     http://$(hostname -I | awk '{print $1}'):${OPENCLAW_PORT:-18789}"
+echo "  Frontend:        http://$(hostname -I | awk '{print $1}'):3000"
+echo ""
+echo "Set these on Vercel:"
+echo "  OPENCLAW_URL=http://$(hostname -I | awk '{print $1}'):${OPENCLAW_PORT:-18789}"
+echo "  MCP_URL=http://$(hostname -I | awk '{print $1}'):${MCP_PORT}/mcp"

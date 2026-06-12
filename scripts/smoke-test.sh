@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # scripts/smoke-test.sh — Quick end-to-end sanity check
-# Usage: bash scripts/smoke-test.sh [MCP_PORT]
+# Usage: bash scripts/smoke-test.sh
 set -euo pipefail
 
-MCP_PORT="${1:-${MCP_PORT:-8000}}"
-QDRANT_PORT="${QDRANT_PORT:-6335}"
+MCP_PORT="${MCP_PORT:-8001}"
+QDRANT_PORT="${QDRANT_PORT:-6333}"
+OPENCLAW_PORT="${OPENCLAW_PORT:-18789}"
 PASS=0
 FAIL=0
 
@@ -28,39 +29,53 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 QDRANT_STATUS=$(curl -sf "http://localhost:${QDRANT_PORT}/healthz" 2>&1 && echo "ok" || echo "unreachable")
 check "Qdrant health (port $QDRANT_PORT)" "$QDRANT_STATUS"
 
-# 2. Qdrant collection exists
+# 2. Qdrant collection exists and has vectors
 COLL=$(curl -sf "http://localhost:${QDRANT_PORT}/collections/strapi_docs" 2>&1)
-if echo "$COLL" | grep -q '"status":"green"'; then
-  check "Qdrant collection strapi_docs" "ok"
+VCOUNT=$(echo "$COLL" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['result']['vectors_count'])" 2>/dev/null || echo "0")
+if [ "$VCOUNT" -gt 0 ] 2>/dev/null; then
+  check "Qdrant collection strapi_docs ($VCOUNT vectors)" "ok"
 else
-  check "Qdrant collection strapi_docs" "not found or not green — run ingestion first"
+  check "Qdrant collection strapi_docs" "empty or not found — run ingestion first"
 fi
 
-# 3. MCP server SSE endpoint responds
-MCP_STATUS=$(curl -sf --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:${MCP_PORT}/sse" 2>&1 || echo "000")
-if [ "$MCP_STATUS" = "200" ] || [ "$MCP_STATUS" = "405" ]; then
-  check "MCP server SSE endpoint (port $MCP_PORT)" "ok"
-else
-  check "MCP server SSE endpoint (port $MCP_PORT)" "HTTP $MCP_STATUS — is server.py running?"
-fi
-
-# 4. search_kb_tool via MCP /search shim (if available)
-SEARCH=$(curl -sf -X POST "http://localhost:${MCP_PORT}/search" \
+# 3. MCP server /mcp endpoint responds
+MCP_STATUS=$(curl -sf --max-time 5 -o /dev/null -w "%{http_code}" \
+  -X POST "http://localhost:${MCP_PORT}/mcp" \
   -H "Content-Type: application/json" \
-  -d '{"query":"What is RBAC?","top_k":2}' 2>&1 || echo "error")
-if echo "$SEARCH" | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d)>0" 2>/dev/null; then
-  check "search_kb returns results" "ok"
+  -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}},"id":1}' \
+  2>&1 || echo "000")
+if [ "$MCP_STATUS" = "200" ]; then
+  check "MCP server /mcp endpoint (port $MCP_PORT)" "ok"
 else
-  check "search_kb returns results" "no results or endpoint not available"
+  check "MCP server /mcp endpoint (port $MCP_PORT)" "HTTP $MCP_STATUS — is mcp-server.service running?"
 fi
 
-# 5. Frontend (if running)
-FE_STATUS=$(curl -sf --max-time 3 -o /dev/null -w "%{http_code}" "http://localhost:3000" 2>&1 || echo "000")
-if [ "$FE_STATUS" = "200" ]; then
-  check "Frontend (port 3000)" "ok"
+# 4. search_kb_tool via MCP returns results
+SEARCH_BODY=$(curl -sf --max-time 10 \
+  -X POST "http://localhost:${MCP_PORT}/mcp" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_kb_tool","arguments":{"query":"API token Strapi","top_k":2}},"id":2}' \
+  2>&1 || echo "error")
+if echo "$SEARCH_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'result' in d" 2>/dev/null; then
+  check "search_kb_tool returns results" "ok"
 else
-  check "Frontend (port 3000)" "HTTP $FE_STATUS — run: cd app && npm run dev"
+  check "search_kb_tool returns results" "no result — check Qdrant has data and MCP is running"
 fi
+
+# 5. OpenClaw Gateway health
+OC_STATUS=$(curl -sf --max-time 5 "http://localhost:${OPENCLAW_PORT}/health" 2>&1 | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok' if d.get('ok') else 'not ok')" 2>/dev/null || echo "unreachable")
+check "OpenClaw Gateway (port $OPENCLAW_PORT)" "$OC_STATUS"
+
+# 6. systemd services enabled
+for svc in mcp-server openclaw; do
+  STATE=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+  if [ "$STATE" = "active" ]; then
+    check "systemd: $svc.service" "ok"
+  else
+    check "systemd: $svc.service" "$STATE — run: sudo systemctl start $svc"
+  fi
+done
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

@@ -34,7 +34,13 @@ def main():
     dim = len(sample_vec)
 
     if client.collection_exists(COLLECTION_NAME):
-        print(f"Collection '{COLLECTION_NAME}' already exists; keeping existing data.")
+        info = client.get_collection(COLLECTION_NAME)
+        vcount = info.vectors_count or 0
+        if vcount > 0:
+            print(f"Collection '{COLLECTION_NAME}' already has {vcount} vectors; skipping upsert.")
+            return
+        else:
+            print(f"Collection '{COLLECTION_NAME}' exists but is empty — re-ingesting …")
     else:
         client.create_collection(
             collection_name=COLLECTION_NAME,
