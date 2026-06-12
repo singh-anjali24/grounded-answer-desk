@@ -56,7 +56,7 @@ const OPENCLAW_URL = process.env.OPENCLAW_URL ?? "http://127.0.0.1:18789";
 const OPENCLAW_TOKEN = process.env.OPENCLAW_TOKEN ?? "";
 
 // MCP server on VPS — used directly for the Retrieval Inspector
-const MCP_URL = process.env.MCP_URL ?? "http://127.0.0.1:8001/sse";
+const MCP_URL = process.env.MCP_URL ?? "http://127.0.0.1:8001/mcp";
 
 const ABSTAIN_THRESHOLD = 0.4;
 
