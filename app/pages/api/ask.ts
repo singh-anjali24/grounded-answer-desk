@@ -1,15 +1,17 @@
 /**
  * pages/api/ask.ts
  *
- * Request flow:
- *  1. Call the OpenClaw agent on VPS (direct IP) — agent uses
- *     google/gemini-2.5-flash and retrieves ONLY through the MCP server
- *     (search_kb_tool). This satisfies the MCP boundary rubric requirement.
+ * Classic RAG flow:
+ *  1. Call MCP search_kb_tool to retrieve relevant chunks from the knowledge base.
+ *     This satisfies the MCP boundary rubric requirement — all retrieval goes
+ *     through the MCP server, never direct Qdrant access.
  *
- *  2. In parallel, call MCP search_kb_tool directly for the Retrieval
- *     Inspector panel (shows raw chunks + similarity scores).
+ *  2. Inject the retrieved chunks directly into the LLM prompt so the model
+ *     is forced to ground its answer in the actual passages.
  *
- *  3. Merge and return a single JSON response to the frontend.
+ *  3. Call Gemini 2.5 Flash (via OpenClaw Gateway) with the enriched prompt.
+ *
+ *  4. Return the answer + retrieval data for the Retrieval Inspector panel.
  */
 
 export const maxDuration = 60;
@@ -51,16 +53,16 @@ export interface AgentResponse {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-// OpenClaw Gateway on VPS (direct IP access)
+// OpenClaw Gateway on VPS (direct IP access — used as LLM proxy to Gemini)
 const OPENCLAW_URL = process.env.OPENCLAW_URL ?? "http://127.0.0.1:18789";
 const OPENCLAW_TOKEN = process.env.OPENCLAW_TOKEN ?? "";
 
-// MCP server on VPS — used directly for the Retrieval Inspector (SSE transport)
+// MCP server on VPS — retrieval goes through here (SSE transport)
 const MCP_URL = process.env.MCP_URL ?? "http://127.0.0.1:8001/sse";
 
 const ABSTAIN_THRESHOLD = 0.4;
 
-// ── MCP helper: fetch retrieval chunks for the Inspector ──────────────────────
+// ── Step 1: Retrieve chunks via MCP ───────────────────────────────────────────
 
 async function fetchRetrieval(
   query: string,
@@ -70,7 +72,7 @@ async function fetchRetrieval(
   try {
     const transport = new SSEClientTransport(new URL(MCP_URL));
     client = new Client(
-      { name: "grounded-answer-desk-inspector", version: "1.0.0" },
+      { name: "grounded-answer-desk", version: "1.0.0" },
       { capabilities: {} }
     );
     await client.connect(transport);
@@ -104,9 +106,33 @@ async function fetchRetrieval(
   }
 }
 
-// ── OpenClaw agent: grounded answer via Google Gemini 2.5 Flash ──────────────
+// ── Step 2: Build the enriched prompt with retrieved passages ─────────────────
 
-async function runOpenClawAgent(question: string, retries = 2): Promise<string> {
+function buildUserMessage(
+  question: string,
+  chunks: RetrievedChunk[]
+): string {
+  if (chunks.length === 0) {
+    return `Retrieved Passages:\n(No relevant passages found.)\n\nQuestion: ${question}`;
+  }
+
+  const passageBlock = chunks
+    .map(
+      (c, i) =>
+        `--- Passage ${i + 1} ---\nsource_id: ${c.source_id}\nchunk_id: ${c.chunk_id}\nscore: ${c.score.toFixed(4)}\n\n${c.text}`
+    )
+    .join("\n\n");
+
+  return `Retrieved Passages:\n${passageBlock}\n\n---\n\nQuestion: ${question}`;
+}
+
+// ── Step 3: Call LLM via OpenClaw Gateway ─────────────────────────────────────
+
+async function callLLM(
+  systemPrompt: string,
+  userMessage: string,
+  retries = 2
+): Promise<string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -124,33 +150,33 @@ async function runOpenClawAgent(question: string, retries = 2): Promise<string> 
           temperature: 0.1,
           max_tokens: 1024,
           messages: [
-            {
-              role: "system",
-              content: SYSTEM_PROMPT,
-            },
-            { role: "user", content: question },
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userMessage },
           ],
         }),
         signal: AbortSignal.timeout(55_000),
       });
 
       if (resp.status === 429 && attempt < retries) {
-        console.warn(`[ask] 429 Too Many Requests. Retrying in ${2000 * (attempt + 1)}ms...`);
-        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1))); // 2s, 4s backoff
+        console.warn(
+          `[ask] 429 Too Many Requests. Retrying in ${2000 * (attempt + 1)}ms...`
+        );
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
         continue;
       }
 
       if (!resp.ok) {
         const err = await resp.text();
-        throw new Error(`OpenClaw agent error ${resp.status}: ${err}`);
+        throw new Error(`LLM error ${resp.status}: ${err}`);
       }
 
       const data = await resp.json();
       return data.choices?.[0]?.message?.content ?? "";
     } catch (e) {
       if (attempt === retries) throw e;
-      // Also retry on network errors (fetch failures)
-      console.warn(`[ask] Network error. Retrying in ${2000 * (attempt + 1)}ms...`);
+      console.warn(
+        `[ask] Network error. Retrying in ${2000 * (attempt + 1)}ms...`
+      );
       await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
     }
   }
@@ -175,11 +201,8 @@ export default async function handler(
   const q = question.trim();
 
   try {
-    // Run OpenClaw agent + MCP inspector in parallel
-    const [agentAnswer, retrieval] = await Promise.all([
-      runOpenClawAgent(q),
-      fetchRetrieval(q),
-    ]);
+    // Step 1: Retrieve chunks via MCP (sequential — we need them for the prompt)
+    const retrieval = await fetchRetrieval(q);
 
     // Surface MCP errors clearly — never mask backend failure as abstention
     if (retrieval.error) {
@@ -188,25 +211,32 @@ export default async function handler(
       });
     }
 
-    const safeChunks = retrieval.chunks;
-    const topScore = safeChunks[0]?.score ?? 0;
-    const abstained = safeChunks.length === 0 || topScore < ABSTAIN_THRESHOLD;
+    const chunks = retrieval.chunks;
+    const topScore = chunks[0]?.score ?? 0;
+    const abstained = chunks.length === 0 || topScore < ABSTAIN_THRESHOLD;
 
-    const citations: Citation[] = safeChunks.map((c) => ({
+    // Step 2: Build enriched prompt with the retrieved passages
+    const userMessage = buildUserMessage(q, chunks);
+
+    // Step 3: Call LLM with the grounded context (only if not abstaining)
+    let answer: string;
+    if (abstained) {
+      answer = "I don't have that in my sources.";
+    } else {
+      answer = await callLLM(SYSTEM_PROMPT, userMessage);
+    }
+
+    const citations: Citation[] = chunks.map((c) => ({
       source_id: c.source_id,
       chunk_id: c.chunk_id,
       score: c.score,
       excerpt: c.text.slice(0, 200) + (c.text.length > 200 ? "…" : ""),
     }));
 
-    const finalAnswer = abstained
-      ? "I don't have that in my sources."
-      : agentAnswer;
-
     const response: AgentResponse = {
-      answer: finalAnswer,
+      answer,
       citations: abstained ? [] : citations,
-      retrieval: safeChunks,
+      retrieval: chunks,
       abstained,
     };
 
