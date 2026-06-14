@@ -2,15 +2,17 @@
 test_mcp_tools.py
 Quick integration test for the MCP server tools using the MCP Python SDK.
 Run: python -X utf8 test_mcp_tools.py  (or set PYTHONUTF8=1)
+
+Uses Streamable HTTP transport (matching server.py's `transport="streamable-http"`).
 """
 import asyncio
 import json
 import sys
 
 from mcp import ClientSession
-from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamablehttp_client
 
-MCP_URL = "http://127.0.0.1:8001/sse"
+MCP_URL = "http://127.0.0.1:8001/mcp"
 
 PASS = 0
 FAIL = 0
@@ -73,8 +75,8 @@ def parse_tool_result(result):
 
 
 async def main():
-    print(f"Connecting to MCP server at {MCP_URL} ...")
-    async with sse_client(MCP_URL) as (read, write):
+    print(f"Connecting to MCP server at {MCP_URL} (Streamable HTTP) ...")
+    async with streamablehttp_client(MCP_URL) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
 

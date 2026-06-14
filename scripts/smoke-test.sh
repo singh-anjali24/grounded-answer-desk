@@ -38,14 +38,14 @@ else
   check "Qdrant collection strapi_docs" "empty or not found — run ingestion first"
 fi
 
-# 3. MCP server /sse endpoint responds
+# 3. MCP server /mcp endpoint responds (Streamable HTTP transport)
 MCP_STATUS=$(curl -sf --max-time 5 -o /dev/null -w "%{http_code}" \
-  "http://localhost:${MCP_PORT}/sse" \
+  "http://localhost:${MCP_PORT}/mcp" \
   2>&1 || echo "000")
-if [ "$MCP_STATUS" = "200" ]; then
-  check "MCP server /sse endpoint (port $MCP_PORT)" "ok"
+if [ "$MCP_STATUS" = "200" ] || [ "$MCP_STATUS" = "405" ]; then
+  check "MCP server /mcp endpoint (port $MCP_PORT)" "ok"
 else
-  check "MCP server /sse endpoint (port $MCP_PORT)" "HTTP $MCP_STATUS — is mcp-server.service running?"
+  check "MCP server /mcp endpoint (port $MCP_PORT)" "HTTP $MCP_STATUS — is mcp-server.service running?"
 fi
 
 # 4. search_kb_tool via MCP returns results

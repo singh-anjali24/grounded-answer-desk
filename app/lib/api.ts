@@ -1,5 +1,11 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
+export interface AgentToolCall {
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  result_preview: string;
+}
+
 export interface AskResponse {
   answer: string;
   citations: Array<{
@@ -15,6 +21,7 @@ export interface AskResponse {
     score: number;
   }>;
   abstained: boolean;
+  agent_tool_calls: AgentToolCall[];
 }
 
 export async function askQuestion(question: string): Promise<AskResponse> {

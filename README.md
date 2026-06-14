@@ -13,24 +13,31 @@ Question (frontend)
     ▼
 Next.js API route (app/pages/api/ask.ts)
     │
-    ├──► OpenClaw Gateway (VPS :18789) — Google Gemini 2.5 Flash
-    │         │  retrieves via MCP (Streamable HTTP)
-    │         ▼
-    │    MCP Server (VPS :8001)
-    │         │  search_kb_tool / get_source_tool
-    │         ▼
-    │    Qdrant vector store (VPS :6333)
-    │         └── top-k chunks + cosine scores
+    │  ┌─── Path A: Agent Answering (MCP boundary) ───────────┐
+    │  │                                                       │
+    ├──►  OpenClaw Gateway (VPS :18789)                        │
+    │     └─ Gemini 2.5 Flash runs the agent loop:             │
+    │        1. LLM decides to call search_kb_tool             │
+    │        2. Gateway executes tool via MCP (Streamable HTTP)│
+    │        3. MCP Server (VPS :8001) queries Qdrant          │
+    │        4. Results fed back to LLM                        │
+    │        5. LLM optionally calls get_source_tool           │
+    │        6. LLM produces grounded answer with citations    │
+    │        (or abstains: "I don't have that in my sources.") │
+    │  └───────────────────────────────────────────────────────┘
     │
-    └──► MCP Server (VPS :8001) — direct call for Retrieval Inspector
-              │
-              ▼
-         top-k chunks + scores → Inspector panel
-
-Answer + Citations + Retrieval Inspector (frontend)
+    │  ┌─── Path B: Retrieval Inspector (observability) ──────┐
+    │  │                                                       │
+    └──►  MCP Server (VPS :8001) — independent inspector call  │
+          └─ search_kb_tool → top-k chunks + scores + source   │
+             → displayed in the Retrieval Inspector panel       │
+    │  └───────────────────────────────────────────────────────┘
+    │
+    ▼
+Answer + Citations + Agent Tool Calls + Retrieval Inspector (frontend)
 ```
 
-**Key constraint:** the agent **never touches Qdrant directly** — it only retrieves through the two MCP tools (`search_kb_tool`, `get_source_tool`). That is the MCP boundary.
+**Key constraint:** the **agent (LLM) autonomously decides** to call `search_kb_tool` and `get_source_tool` via MCP. The application code never pre-fetches chunks or stuffs them into the prompt — the agent retrieves through its MCP tools, formulates a grounded answer, and cites sources. That is the MCP boundary.
 
 ---
 
@@ -184,13 +191,14 @@ Test queries:
 
 ## System Prompt (Grounding Contract)
 
-The agent's system prompt is defined in `app/pages/api/ask.ts` and enforces strict grounding:
+The agent's system prompt is defined in `app/lib/prompts/system.txt` and enforces strict grounding. The agent **autonomously** uses MCP tools:
 
-1. **Must call `search_kb_tool` first** before answering anything
-2. **Answer ONLY from retrieved passages** — no training data, no web search
-3. **Cite `source_id` and `chunk_id`** for every fact
-4. **Abstain** if top retrieval score < 0.40: _"I don't have that in my sources."_
-5. **Never hallucinate** — only facts from retrieved passages
+1. **Must call `search_kb_tool` first** — the agent decides to use this tool before answering
+2. **May call `get_source_tool`** — for additional context about a source document
+3. **Answer ONLY from retrieved passages** — no training data, no web search
+4. **Cite `source_id` and `chunk_id`** for every fact in `[source_id/chunk_id]` format
+5. **Abstain** when retrieval quality is poor: _"I don't have that in my sources."_ — the **agent decides**, not hardcoded logic
+6. **Never hallucinate** — only facts from retrieved passages
 
 ---
 
@@ -245,10 +253,10 @@ Frontend → Vercel: push triggers auto-deploy. Set these env vars in Vercel das
 | OpenClaw agent on VPS | OpenClaw Gateway (`openclaw.service`) + Google Gemini 2.5 Flash |
 | Ingest corpus → chunks → embed → vector store | `ingestion/` pipeline → Qdrant |
 | MCP server with `search_kb_tool` + `get_source_tool` | `mcp-server/server.py` (FastMCP, Streamable HTTP) |
-| Agent retrieves **only** through MCP tools | Enforced by architecture — no direct Qdrant access in agent |
-| Grounded answers with citations | System prompt in `app/pages/api/ask.ts` + citation cards in frontend |
-| Abstain when retrieval is weak | Score threshold 0.40 in `ask.ts` |
-| Retrieval inspector (chunks + scores + source) | `app/components/RetrievalInspector.tsx` |
+| Agent retrieves **only** through MCP tools | OpenClaw agent loop — LLM autonomously calls MCP tools, no direct Qdrant in app code |
+| Grounded answers with citations | Agent's system prompt enforces grounding; citations parsed from LLM's `[source_id/chunk_id]` references |
+| Abstain when retrieval is weak | Agent decides based on retrieval quality — no hardcoded threshold |
+| Retrieval inspector (chunks + scores + source) | `app/components/RetrievalInspector.tsx` — shows agent tool calls + independent retrieval data |
 | README redeploys from scratch | `scripts/deploy.sh` + this README |
 | Deployed, public, persistent | Vercel (frontend) + AWS EC2 with systemd (backend) |
 

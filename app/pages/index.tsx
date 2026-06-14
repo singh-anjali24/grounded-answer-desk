@@ -92,7 +92,10 @@ export default function Home() {
                 citations={result.citations}
                 abstained={result.abstained}
               />
-              <RetrievalInspector chunks={result.retrieval} />
+              <RetrievalInspector
+                chunks={result.retrieval}
+                agentToolCalls={result.agent_tool_calls}
+              />
             </>
           )}
         </div>
