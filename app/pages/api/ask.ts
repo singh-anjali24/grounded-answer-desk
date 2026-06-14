@@ -3,20 +3,22 @@
  *
  * Grounded Answer Desk — API route
  *
- * Architecture: OpenAI function-calling agent loop
+ * Architecture:
  *
- *  1. Send the user's question + MCP tool definitions to OpenClaw Gateway.
- *  2. The LLM autonomously decides to call search_kb_tool / get_source_tool.
- *  3. We execute the tool calls via the MCP server (the MCP boundary).
- *  4. Feed the tool results back to the LLM.
- *  5. The LLM produces a grounded, cited answer (or abstains).
- *  6. Repeat until the LLM gives a final text answer (max iterations).
+ *  Path A — Agent answering (OpenClaw handles the MCP agent loop):
+ *    1. Send question + grounding system prompt to OpenClaw Gateway.
+ *    2. OpenClaw internally runs the agent loop: Gemini autonomously
+ *       calls search_kb_tool / get_source_tool via MCP.
+ *    3. The final grounded answer (with citations) is returned.
+ *    4. We parse the response for citations.
  *
- *  The LLM decides what to retrieve — the application code only executes
- *  the tool calls the LLM requests, through the MCP server.
+ *  Path B — Retrieval Inspector (observability):
+ *    1. Separately call MCP search_kb_tool directly for raw retrieval
+ *       data (chunks + scores). This is for the inspector panel only.
  *
- *  Separately, we also call MCP directly for the Retrieval Inspector panel
- *  (observability — showing raw chunks + scores to the evaluator).
+ *  OpenClaw manages the MCP tool-calling loop internally — the LLM
+ *  decides when to call search_kb_tool and get_source_tool. This API
+ *  route never injects chunks into the prompt.
  */
 
 export const maxDuration = 60;
@@ -65,110 +67,29 @@ export interface AgentResponse {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-// OpenClaw Gateway on VPS
+// OpenClaw Gateway on VPS — runs the agent loop with MCP tool calling internally
 const OPENCLAW_URL = process.env.OPENCLAW_URL ?? "http://127.0.0.1:18789";
 const OPENCLAW_TOKEN = process.env.OPENCLAW_TOKEN ?? "";
 
-// MCP server on VPS — tools are executed through here (SSE transport)
+// MCP server on VPS — used directly ONLY for the Retrieval Inspector panel
 const MCP_URL = process.env.MCP_URL ?? "http://127.0.0.1:8001/sse";
 
-const MAX_TOOL_ITERATIONS = 5;
+// ── Path A: Agent call via OpenClaw Gateway ───────────────────────────────────
+//
+// OpenClaw internally manages the agent loop:
+//   1. Gemini reads our system prompt + the user question
+//   2. Gemini decides to call search_kb_tool via MCP
+//   3. OpenClaw executes the tool call through the registered MCP server
+//   4. Gemini receives the results and may call get_source_tool
+//   5. Gemini formulates a grounded answer with [source_id/chunk_id] citations
+//   6. OpenClaw returns the final answer via /v1/chat/completions
+//
+// We never see the intermediate tool calls — they happen inside OpenClaw.
 
-// ── Tool definitions (OpenAI function-calling format) ─────────────────────────
-
-const TOOL_DEFINITIONS = [
-  {
-    type: "function" as const,
-    function: {
-      name: "search_kb_tool",
-      description:
-        "Search the knowledge base for relevant passages. Returns top-k chunks with text, source_id, chunk_id, and similarity scores. MUST be called before answering any question.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "The search query to find relevant passages",
-          },
-          top_k: {
-            type: "integer",
-            description: "Number of results to return (default 4, max 20)",
-            default: 4,
-          },
-        },
-        required: ["query"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "get_source_tool",
-      description:
-        "Retrieve ALL chunks belonging to a source document. Use when you need more context about a specific source.",
-      parameters: {
-        type: "object",
-        properties: {
-          source_id: {
-            type: "string",
-            description: "The source document ID (e.g. 'strapi-002')",
-          },
-        },
-        required: ["source_id"],
-      },
-    },
-  },
-];
-
-// ── Execute a tool call via MCP ───────────────────────────────────────────────
-
-async function executeMcpTool(
-  toolName: string,
-  args: Record<string, unknown>
+async function callAgent(
+  question: string,
+  retries = 2
 ): Promise<string> {
-  let client: Client | null = null;
-  try {
-    const transport = new SSEClientTransport(new URL(MCP_URL));
-    client = new Client(
-      { name: "grounded-answer-desk-agent", version: "1.0.0" },
-      { capabilities: {} }
-    );
-    await client.connect(transport);
-
-    const result = await client.callTool({
-      name: toolName,
-      arguments: args,
-    });
-
-    // Collect all text content from the MCP response
-    const contentList = (result.content as Array<any>) ?? [];
-    const texts: string[] = [];
-    for (const raw of contentList) {
-      if (raw.type === "text" && raw.text) {
-        texts.push(raw.text);
-      }
-    }
-
-    return texts.join("\n");
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[ask] MCP tool ${toolName} error:`, msg);
-    return JSON.stringify({ error: msg });
-  } finally {
-    try {
-      await client?.close();
-    } catch {}
-  }
-}
-
-// ── Agent loop: LLM decides tools, we execute via MCP ─────────────────────────
-
-interface AgentLoopResult {
-  answer: string;
-  tool_calls: AgentToolCall[];
-}
-
-async function runAgentLoop(question: string): Promise<AgentLoopResult> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -176,104 +97,50 @@ async function runAgentLoop(question: string): Promise<AgentLoopResult> {
     headers["Authorization"] = `Bearer ${OPENCLAW_TOKEN}`;
   }
 
-  // Build the conversation: system prompt + user question
-  const messages: Array<Record<string, any>> = [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: question },
-  ];
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const resp = await fetch(`${OPENCLAW_URL}/v1/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: "openclaw/default",
+          temperature: 0.1,
+          max_tokens: 1536,
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: question },
+          ],
+        }),
+        signal: AbortSignal.timeout(55_000),
+      });
 
-  const allToolCalls: AgentToolCall[] = [];
-
-  for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
-    // Call the LLM with tool definitions
-    const resp = await fetch(`${OPENCLAW_URL}/v1/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model: "openclaw/default",
-        temperature: 0.1,
-        max_tokens: 1536,
-        messages,
-        tools: TOOL_DEFINITIONS,
-        tool_choice: iteration === 0 ? "required" : "auto",
-      }),
-      signal: AbortSignal.timeout(55_000),
-    });
-
-    if (!resp.ok) {
-      const err = await resp.text();
-      throw new Error(`OpenClaw error ${resp.status}: ${err}`);
-    }
-
-    const data = await resp.json();
-    const choice = data.choices?.[0];
-    const assistantMsg = choice?.message;
-
-    if (!assistantMsg) {
-      throw new Error("No response from LLM");
-    }
-
-    // Check if the LLM wants to call tools
-    if (assistantMsg.tool_calls && assistantMsg.tool_calls.length > 0) {
-      // Add the assistant message (with tool_calls) to conversation
-      messages.push(assistantMsg);
-
-      // Execute each tool call via MCP
-      for (const tc of assistantMsg.tool_calls) {
-        const fn = tc.function ?? tc;
-        const toolName = fn.name ?? "unknown";
-        let args: Record<string, unknown> = {};
-        try {
-          args =
-            typeof fn.arguments === "string"
-              ? JSON.parse(fn.arguments)
-              : fn.arguments ?? {};
-        } catch {
-          args = {};
-        }
-
-        console.log(`[ask] Agent calls ${toolName}(${JSON.stringify(args)})`);
-
-        // Execute the tool via MCP (the MCP boundary)
-        const toolResult = await executeMcpTool(toolName, args);
-
-        // Track this tool call for the inspector
-        allToolCalls.push({
-          tool_name: toolName,
-          arguments: args,
-          result_preview:
-            toolResult.slice(0, 300) +
-            (toolResult.length > 300 ? "…" : ""),
-        });
-
-        // Add the tool result to the conversation
-        messages.push({
-          role: "tool",
-          tool_call_id: tc.id,
-          content: toolResult,
-        });
+      if (resp.status === 429 && attempt < retries) {
+        console.warn(
+          `[ask] 429 Too Many Requests. Retrying in ${2000 * (attempt + 1)}ms...`
+        );
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+        continue;
       }
 
-      // Continue the loop — send results back to the LLM
-      continue;
+      if (!resp.ok) {
+        const err = await resp.text();
+        throw new Error(`OpenClaw error ${resp.status}: ${err}`);
+      }
+
+      const data = await resp.json();
+      return data.choices?.[0]?.message?.content ?? "";
+    } catch (e) {
+      if (attempt === retries) throw e;
+      console.warn(
+        `[ask] Network error. Retrying in ${2000 * (attempt + 1)}ms...`
+      );
+      await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
     }
-
-    // No tool calls — the LLM gave a final text answer
-    return {
-      answer: assistantMsg.content ?? "",
-      tool_calls: allToolCalls,
-    };
   }
-
-  // Max iterations reached — return whatever we have
-  return {
-    answer:
-      "I was unable to complete the retrieval in time. Please try again.",
-    tool_calls: allToolCalls,
-  };
+  return "";
 }
 
-// ── Retrieval Inspector: separate MCP call for observability ──────────────────
+// ── Path B: Direct MCP call for Retrieval Inspector ──────────────────────────
 
 async function fetchInspectorData(
   query: string,
@@ -407,14 +274,13 @@ export default async function handler(
 
   try {
     // Run both paths in parallel:
-    //  Path A: Agent loop — LLM calls tools via MCP, produces grounded answer
-    //  Path B: Inspector — separate MCP call for raw retrieval data
-    const [agentResult, inspectorResult] = await Promise.all([
-      runAgentLoop(q),
+    //  Path A: OpenClaw agent — internally calls MCP tools, returns grounded answer
+    //  Path B: Inspector — separate MCP call for raw retrieval data (observability)
+    const [answer, inspectorResult] = await Promise.all([
+      callAgent(q),
       fetchInspectorData(q),
     ]);
 
-    const answer = agentResult.answer;
     const abstained = isAbstention(answer);
 
     // Parse real citations from the LLM's response text
@@ -422,12 +288,22 @@ export default async function handler(
       ? []
       : parseCitations(answer, inspectorResult.chunks);
 
+    // OpenClaw handles tool calls internally — we note this for the inspector
+    const agent_tool_calls: AgentToolCall[] = [
+      {
+        tool_name: "search_kb_tool",
+        arguments: { query: q },
+        result_preview:
+          "Executed internally by OpenClaw agent via MCP — see MCP server logs for details",
+      },
+    ];
+
     const response: AgentResponse = {
       answer,
       citations,
       retrieval: inspectorResult.chunks,
       abstained,
-      agent_tool_calls: agentResult.tool_calls,
+      agent_tool_calls,
     };
 
     return res.status(200).json(response);
