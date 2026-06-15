@@ -15,8 +15,8 @@ agent:
   # MCP server the agent retrieves through (the only path to the knowledge base)
   mcp_servers:
     - name: grounded-answer-desk-kb
-      transport: streamable-http
-      url: ${MCP_URL:-http://127.0.0.1:8001/mcp}
+      transport: sse
+      url: ${MCP_URL:-http://127.0.0.1:8001/sse}
 
   # Tool selection strategy
   tool_choice: auto

@@ -74,6 +74,14 @@ const OPENCLAW_TOKEN = process.env.OPENCLAW_TOKEN ?? "";
 // MCP server on VPS — used directly ONLY for the Retrieval Inspector panel
 const MCP_URL = process.env.MCP_URL ?? "http://127.0.0.1:8001/sse";
 
+// ── Fallback LLM config (used when OpenClaw gateway is unreachable) ──────────
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY ?? "";
+const LLM_BASE_URL =
+  process.env.LLM_BASE_URL ?? "https://openrouter.ai/api/v1";
+const LLM_MODEL =
+  process.env.LLM_MODEL ?? "meta-llama/llama-3-8b-instruct:free";
+const LLM_API_KEY = process.env.LLM_API_KEY ?? "";
+
 // ── Path A: Agent call via OpenClaw Gateway ───────────────────────────────────
 //
 // OpenClaw internally manages the agent loop:
@@ -88,7 +96,7 @@ const MCP_URL = process.env.MCP_URL ?? "http://127.0.0.1:8001/sse";
 
 async function callAgent(
   question: string,
-  retries = 2
+  retries = 1
 ): Promise<string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -111,7 +119,7 @@ async function callAgent(
             { role: "user", content: question },
           ],
         }),
-        signal: AbortSignal.timeout(55_000),
+        signal: AbortSignal.timeout(25_000),
       });
 
       if (resp.status === 429 && attempt < retries) {
@@ -138,6 +146,106 @@ async function callAgent(
     }
   }
   return "";
+}
+
+// ── Fallback: Direct LLM call with pre-fetched MCP chunks ────────────────────
+// Used when OpenClaw gateway is unreachable. Calls the LLM API directly with
+// chunks already retrieved via MCP, bypassing the agent tool-calling loop.
+
+const FALLBACK_SYSTEM_PROMPT =
+  SYSTEM_PROMPT +
+  "\n\nIMPORTANT: The knowledge base search has already been performed for you. " +
+  "The retrieved passages are provided below the user's question. " +
+  "You do NOT need to call any tools — answer ONLY from the provided passages, " +
+  "following all citation rules in your instructions above.";
+
+function buildFallbackUserMessage(
+  question: string,
+  chunks: RetrievedChunk[]
+): string {
+  const passages = chunks
+    .map(
+      (c, i) =>
+        `[Passage ${i + 1}] (source_id: ${c.source_id}, chunk_id: ${c.chunk_id}, score: ${c.score.toFixed(3)})\n${c.text}`
+    )
+    .join("\n\n");
+
+  return `${question}\n\n--- Retrieved Passages ---\n${passages}\n--- End of Passages ---`;
+}
+
+async function callGoogleAI(userMessage: string): Promise<string> {
+  const resp = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GOOGLE_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: userMessage }] }],
+        systemInstruction: { parts: [{ text: FALLBACK_SYSTEM_PROMPT }] },
+        generationConfig: { temperature: 0.1, maxOutputTokens: 1536 },
+      }),
+      signal: AbortSignal.timeout(30_000),
+    }
+  );
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`Google AI error ${resp.status}: ${err}`);
+  }
+
+  const data = await resp.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+}
+
+async function callOpenAICompatible(userMessage: string): Promise<string> {
+  const resp = await fetch(`${LLM_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${LLM_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: LLM_MODEL,
+      temperature: 0.1,
+      max_tokens: 1536,
+      messages: [
+        { role: "system", content: FALLBACK_SYSTEM_PROMPT },
+        { role: "user", content: userMessage },
+      ],
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`LLM API error ${resp.status}: ${err}`);
+  }
+
+  const data = await resp.json();
+  return data.choices?.[0]?.message?.content ?? "";
+}
+
+async function callLLMDirect(
+  question: string,
+  chunks: RetrievedChunk[]
+): Promise<string> {
+  const userMessage = buildFallbackUserMessage(question, chunks);
+
+  // Prefer Google AI Studio if API key is available
+  if (GOOGLE_API_KEY) {
+    console.log("[ask] Fallback: using Google AI Studio");
+    return callGoogleAI(userMessage);
+  }
+
+  // Fall back to OpenRouter / any OpenAI-compatible API
+  if (LLM_API_KEY) {
+    console.log("[ask] Fallback: using OpenAI-compatible API");
+    return callOpenAICompatible(userMessage);
+  }
+
+  throw new Error(
+    "No LLM API key configured for fallback. Set GOOGLE_API_KEY or LLM_API_KEY."
+  );
 }
 
 // ── Path B: Direct MCP call for Retrieval Inspector ──────────────────────────
@@ -273,28 +381,56 @@ export default async function handler(
   const q = question.trim();
 
   try {
-    // Run both paths in parallel:
-    //  Path A: OpenClaw agent — internally calls MCP tools, returns grounded answer
-    //  Path B: Inspector — separate MCP call for raw retrieval data (observability)
-    const [answer, inspectorResult] = await Promise.all([
+    // Run both paths in parallel — allSettled ensures OpenClaw failure
+    // doesn't prevent inspector data from being collected
+    const [agentSettled, inspectorSettled] = await Promise.allSettled([
       callAgent(q),
       fetchInspectorData(q),
     ]);
 
+    const inspectorResult =
+      inspectorSettled.status === "fulfilled"
+        ? inspectorSettled.value
+        : { chunks: [] as RetrievedChunk[], error: "Inspector MCP failed" };
+
+    let answer: string;
+    let usedFallback = false;
+
+    if (agentSettled.status === "fulfilled") {
+      answer = agentSettled.value;
+    } else {
+      // OpenClaw is down — try direct MCP retrieval + LLM fallback
+      const reason =
+        agentSettled.reason instanceof Error
+          ? agentSettled.reason.message
+          : String(agentSettled.reason);
+      console.warn(
+        "[ask] OpenClaw failed, attempting direct LLM fallback:",
+        reason
+      );
+
+      if (inspectorResult.chunks.length === 0) {
+        // Both OpenClaw and MCP failed — surface the original error
+        throw agentSettled.reason;
+      }
+
+      usedFallback = true;
+      answer = await callLLMDirect(q, inspectorResult.chunks);
+    }
+
     const abstained = isAbstention(answer);
 
-    // Parse real citations from the LLM's response text
     const citations = abstained
       ? []
       : parseCitations(answer, inspectorResult.chunks);
 
-    // OpenClaw handles tool calls internally — we note this for the inspector
     const agent_tool_calls: AgentToolCall[] = [
       {
         tool_name: "search_kb_tool",
         arguments: { query: q },
-        result_preview:
-          "Executed internally by OpenClaw agent via MCP — see MCP server logs for details",
+        result_preview: usedFallback
+          ? "OpenClaw unavailable — used direct MCP retrieval + LLM fallback"
+          : "Executed internally by OpenClaw agent via MCP",
       },
     ];
 
